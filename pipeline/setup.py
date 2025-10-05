@@ -15,7 +15,7 @@ limitations under the License.
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 import os
 from pipeline.vault import HookUploader
 from accelerate import dispatch_model, infer_auto_device_map
@@ -198,8 +198,8 @@ def maybe_add_mlp_attn_hooks(model: AutoModelForCausalLM, hooks: List[str] = Non
 
 
 def setup_uploaders(
-    run_name: str, hooks: List[str], batches_per_upload: int, bucket_name: str
-) -> Dict[str, HookUploader]:
+    run_name: str, hooks: List[str], batches_per_upload: int, bucket_name: str, decode_enabled: bool = True
+) -> Tuple[Dict[str, HookUploader], Optional[dict[str, HookUploader]]]:
     """Create S3 uploaders for storing activation data from each hook.
 
     Args:
@@ -207,31 +207,42 @@ def setup_uploaders(
         hooks: List of hook names requiring uploaders
         batches_per_upload: Number of batches to accumulate before upload
         bucket_name: S3 bucket name for storage
+        decode_enabled: whether to provide secondary uploaders for decode-stage activations
 
     Returns:
         dict: Mapping of hook names to their respective uploaders
 
     Example:
         ```python
-        uploaders = setup_uploaders(
+        uploaders, decode_uploaders = setup_uploaders(
             "experiment_1",
             hooks=["models.layers.0.mlp.post"],
-            batches_per_upload=10
+            batches_per_upload=10,
+            decode_enabled=True,
         )
         ```
     """
     uploaders = {}
+    decode_uploaders = {} if decode_enabled else None
     for hook in hooks:
-        uploader = HookUploader.from_credentials(
+        base_prefix = f"{run_name}/{hook}"
+        uploaders[hook] = HookUploader.from_credentials(
             access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
             secret=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            prefix_path=f"{run_name}/{hook}",
+            prefix_path=f"{base_prefix}/prefill",
             batches_per_upload=batches_per_upload,
             bucket_name=bucket_name,
         )
-        uploaders[hook] = uploader
+        if decode_uploaders is not None:
+            decode_uploaders[hook] = HookUploader.from_credentials(
+                access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
+                secret=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+                prefix_path=f"{base_prefix}/decode",
+                batches_per_upload=batches_per_upload,
+                bucket_name=bucket_name,
+            )
 
-    return uploaders
+    return uploaders, decode_uploaders
 
 
 def calculate_machine_params(
