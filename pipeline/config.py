@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 import yaml
 import argparse
@@ -60,6 +60,15 @@ class Config:
     transformer_config: Dict[str, Any]
     data_config: Dict[str, Any]
     upload_config: Dict[str, Any]
+    decode_config: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "enable": True,
+            "max_new_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "stop_on_eos": True,
+        }
+    )
     num_runs: int
     total_tokens: int = 0
     d_model: Optional[int] = None
@@ -80,6 +89,7 @@ class Config:
             "transformer_config": self.transformer_config,
             "data_config": self.data_config,
             "upload_config": self.upload_config,
+            "decode_config": self.decode_config,
             "total_tokens": self.total_tokens,
             "d_model": self.d_model,
             "n_total_files": self.n_total_files,
@@ -99,6 +109,17 @@ class Config:
         """
         with open(path) as f:
             config_dict = yaml.safe_load(f)
+
+        config_dict.setdefault(
+            "decode_config", {
+                "enable": True,
+                "max_new_tokens": 1024,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "stop_on_eos": True,
+            },
+        )
+
         return cls(**config_dict)
 
     @classmethod
@@ -231,6 +252,16 @@ class Config:
 
             response = s3_client.get_object(Bucket=bucket_name, Key=key)
             config_dict = json.loads(response["Body"].read())
+
+            config_dict.setdefault(
+                "decode_config", {
+                    "enable": True,
+                    "max_new_tokens": 1024,
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "stop_on_eos": True,
+                },
+            )
 
             # Convert from old format to new
             if "max_length" in config_dict:
