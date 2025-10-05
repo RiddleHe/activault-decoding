@@ -62,11 +62,13 @@ def main():
     display_job_stats(model, hooks, config, batches_per_machine)
 
     # Setup uploaders (one per hook)
-    uploaders = setup_uploaders(
+    decode_enabled = config.decode_config.get("enable", False)
+    uploaders, decode_uploaders = setup_uploaders(
         run_name=config.run_name,
         hooks=hooks,
         batches_per_upload=config.upload_config["batches_per_upload"],
         bucket_name=config.data_config["bucket_name"],
+        decode_enabled=decode_enabled,
     )
     logger.info(f"Uploaders loaded: {uploaders}")
 
@@ -84,7 +86,7 @@ def main():
     )
 
     # Run generation
-    generate_activations(model, loader, config, uploaders, added_hook_activations)
+    generate_activations(model, loader, config, uploaders, added_hook_activations, decode_uploaders=decode_uploaders)
 
     # just in case...
     logger.info(

@@ -198,7 +198,7 @@ def maybe_add_mlp_attn_hooks(model: AutoModelForCausalLM, hooks: List[str] = Non
 
 
 def setup_uploaders(
-    run_name: str, hooks: List[str], batches_per_upload: int, bucket_name: str, decode_enabled: bool = True
+    run_name: str, hooks: List[str], batches_per_upload: int, bucket_name: str, decode_enabled: bool = False
 ) -> Tuple[Dict[str, HookUploader], Optional[dict[str, HookUploader]]]:
     """Create S3 uploaders for storing activation data from each hook.
 

@@ -62,7 +62,7 @@ class Config:
     upload_config: Dict[str, Any]
     decode_config: Dict[str, Any] = field(
         default_factory=lambda: {
-            "enable": True,
+            "enable": False,
             "max_new_tokens": 1024,
             "temperature": 1.0,
             "top_p": 0.95,
@@ -112,7 +112,7 @@ class Config:
 
         config_dict.setdefault(
             "decode_config", {
-                "enable": True,
+                "enable": False,
                 "max_new_tokens": 1024,
                 "temperature": 1.0,
                 "top_p": 0.95,
@@ -255,7 +255,7 @@ class Config:
 
             config_dict.setdefault(
                 "decode_config", {
-                    "enable": True,
+                    "enable": False,
                     "max_new_tokens": 1024,
                     "temperature": 1.0,
                     "top_p": 0.95,
