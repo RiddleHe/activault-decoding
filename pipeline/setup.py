@@ -198,7 +198,8 @@ def maybe_add_mlp_attn_hooks(model: AutoModelForCausalLM, hooks: List[str] = Non
 
 
 def setup_uploaders(
-    run_name: str, hooks: List[str], batches_per_upload: int, bucket_name: str, decode_enabled: bool = False
+    run_name: str, hooks: List[str], batches_per_upload: int, bucket_name: str, decode_enabled: bool = False,
+    storage_backend: str = "s3", local_output_dir: str = "activations"
 ) -> Tuple[Dict[str, HookUploader], Optional[dict[str, HookUploader]]]:
     """Create S3 uploaders for storing activation data from each hook.
 
@@ -208,6 +209,8 @@ def setup_uploaders(
         batches_per_upload: Number of batches to accumulate before upload
         bucket_name: S3 bucket name for storage
         decode_enabled: whether to provide secondary uploaders for decode-stage activations
+        storage_backend:
+        local_output_dir:
 
     Returns:
         dict: Mapping of hook names to their respective uploaders
@@ -222,10 +225,35 @@ def setup_uploaders(
         )
         ```
     """
+    backend = storage_backend.lower()
+    if backend not in {"s3", "disk"}:
+        raise ValueError(f"Unsupported storage backend: {backend}")
+
     uploaders = {}
     decode_uploaders = {} if decode_enabled else None
+
+    local_root = None
+    if backend == "disk":
+        local_root = Path(local_output_dir)
+        local_root.mkdir(parents=True, exist_ok=True)
+
     for hook in hooks:
         base_prefix = f"{run_name}/{hook}"
+
+        if backend == "disk":
+            uploaders[hook] = LocalHookUploader(
+                output_root=local_root,
+                prefix_path=f"{base_prefix}/prefill",
+                batches_per_upload=batches_per_upload,
+            )
+            if decode_uploaders is not None:
+                decode_uploaders[hook] = LocalHookUploader(
+                    output_root=local_root,
+                    prefix_path=f"{base_prefix}/decode",
+                    batches_per_upload=batches_per_upload,
+                )
+            continue
+
         uploaders[hook] = HookUploader.from_credentials(
             access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
             secret=os.environ.get("AWS_SECRET_ACCESS_KEY"),

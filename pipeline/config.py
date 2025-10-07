@@ -120,6 +120,10 @@ class Config:
             },
         )
 
+        upload_config = config_dict.setdefault("upload_config", {})
+        upload_config.setdefault("storage_backend", "s3")
+        upload_config.setdefault("local_output_dir", "activations")
+
         return cls(**config_dict)
 
     @classmethod
@@ -277,6 +281,10 @@ class Config:
 
             # Add missing fields with defaults
             config_dict.setdefault("num_runs", 1)  # Default to 1 if missing
+
+            upload_config = config_dict.setdefault("upload_config", {})
+            upload_config.setdefault("storage_backend", "s3")
+            upload_config.setdefault("local_output_dir", "activations")
 
             # Remove thread field if present
             config_dict.pop("_save_thread", None)
