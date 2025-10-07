@@ -16,7 +16,8 @@ limitations under the License.
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
-from typing import Dict
+from transformers.generation.utils import top_k_top_p_filtering
+from typing import Dict, Optional
 from pipeline.data.dataloader import DataLoader
 from pipeline.config import Config
 from pipeline.vault import HookUploader
@@ -31,8 +32,9 @@ def generate_activations(
     model: AutoModelForCausalLM,
     loader: DataLoader,
     config: Config,
-    uploaders: Dict[str, HookUploader] = None,
+    uploaders: Dict[str, HookUploader],
     hook_activations: Dict[str, Dict[str, torch.Tensor]] = None,
+    decode_uploaders: Optional[Dict[str, HookUploader]] = None,
 ) -> None:
     """
     Main activation generation loop.
@@ -42,6 +44,8 @@ def generate_activations(
         loader: DataLoader instance
         config: Configuration object
         uploaders: Dictionary mapping hook names to their uploaders
+        hook_activations: Cache populated by PyTorch hooks
+        decode_uploaders: Dictionary mapping hook names to their decode-stage uploaders
     """
     # Set d_model in config
     config.d_model = model.config.hidden_size
@@ -104,6 +108,89 @@ def generate_activations(
     )
     loader.skip_tokens(tokens_to_skip)
 
+    decode_enabled = (
+        decode_uploaders is not None and config.decode_config.get("enable", False)
+    )
+    if config.decode_config.get("enable", False) and decode_uploaders is None:
+        raise RuntimeError("Decode activations requested but decode uploaders were not provided")
+
+    max_new_tokens = int(config.decode_config.get("max_new_tokens", 1024)) if decode_enabled else 0
+    temperature = float(config.decode_config.get("temperature", 0.7))
+    top_p = float(config.decode_config.get("top_p", 0.95))
+    stop_on_eos = bool(config.decode_config.get("stop_on_eos", True))
+    eos_token_id = model.config.eos_token_id
+    decode_tokens_written = False
+
+    def sample_next_token(logits):
+        if temperature <= 0:
+            return torch.argmax(logits, dim=-1)
+        filtered_logits = top_k_top_p_filtering(
+            logits / max(temperature, 1e-5),
+            top_k=0,
+            top_p=top_p,
+        )
+        probs = torch.softmax(filtered_logits, dim=-1)
+        probs = probs / probs.sum(dim=-1, keepdim=True)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+    def extract_activations(hidden_states, token_tensor):
+        activations = {}
+        for hook in hooks:
+            if hook_activations and hook in hook_activations:
+                payload = hook_activations[hook]
+            else:
+                layer_idx = int(hook.split(".")[2])
+                if "pre" in hook:
+                    payload = hidden_states[layer_idx]
+                else:
+                    payload = hidden_states[layer_idx + 1]
+
+            activations[hook] = {
+                "states": payload,
+                "input_ids": token_tensor,
+            }
+
+        if hook_activations:
+            hook_activations.clear()
+        return activations
+
+    def queue_stage(cleaned_map, stage_uploaders, group_uuid):
+        if not stage_uploaders:
+            return False
+        
+        any_uploaded = False
+        for hook in hooks:
+            if hook not in cleaned_map:
+                continue
+
+            states = cleaned_map[hook]["states"]
+            input_ids = cleaned_map[hook]["input_ids"]
+            if states.numel() == 0:
+                continue
+
+            N, T = states.shape[0], states.shape[1]
+            total_tokens = N * T
+            counts[hook] += total_tokens
+
+            delta = states.mean(dim=(0, 1)) - means[hook]
+            means[hook] += delta * (total_tokens / counts[hook])
+
+            delta2 = states.mean(dim=(0, 1)) - means[hook]
+            M2s[hook] += total_tokens * delta * delta2
+
+            norm_sums[hook] += torch.norm(states, dim=2).sum().item()
+            norm_counts[hook] += total_tokens
+
+            cpu_activations = {
+                "states": states.to(device="cpu", non_blocking=True),
+                "input_ids": input_ids.to(device="cpu", non_blocking=True),
+            }
+            file_id = stage_uploaders[hook].append(cpu_activations, group_uuid)
+            if file_id:
+                any_uploaded = True
+
+        return any_uploaded
+
     # Main loop
     model.eval()
     with torch.no_grad():
@@ -117,7 +204,6 @@ def generate_activations(
 
         # Generate a new UUID for each batch group
         current_group_uuid = str(uuid4())
-        group_batch_count = 0
 
         for batch_idx, batch in enumerate(loader):
             if batch_idx >= config.data_config["n_batches"]:
@@ -125,31 +211,17 @@ def generate_activations(
 
             # Move batch to model's device
             batch = {k: v.to(device=model.device) for k, v in batch.items()}
+            attention_mask = batch.get("attention_mask")
+            use_cache = decode_enabled and max_new_tokens > 0
 
             # Forward pass
-            outputs = model(**batch, output_hidden_states=True)
+            outputs = model(
+                **batch, output_hidden_states=True, use_cache=use_cache
+            )
+            past_key_values = outputs.past_key_values if use_cache else None
 
             # Extract activations
-            activations = {}
-            for hook in hooks:
-                if hook in hook_activations:
-                    activations[hook] = {
-                        "states": hook_activations[hook],
-                        "input_ids": batch["input_ids"],
-                    }
-                else:
-                    # Handle pre and post hooks separately
-                    layer_idx = int(hook.split(".")[2])
-                    if "pre" in hook:
-                        activations[hook] = {
-                            "states": outputs.hidden_states[layer_idx],
-                            "input_ids": batch["input_ids"],
-                        }
-                    elif "post" in hook:
-                        activations[hook] = {
-                            "states": outputs.hidden_states[layer_idx + 1],
-                            "input_ids": batch["input_ids"],
-                        }
+            activations = extract_activations(outputs.hidden_states, batch["input_ids"])
 
             try:
                 # Clean special tokens from activations (e.g. BOS)
@@ -173,48 +245,12 @@ def generate_activations(
 
             # Compute statistics and move to CPU
             if uploaders:
-                any_file_uploaded = False
-                for hook in hooks:
-                    # Get current batch activations
-                    states = cleaned_activations[hook]["states"]
-                    N, T = states.shape[0], states.shape[1]
-                    total_tokens = N * T
-
-                    # Update statistics using Welford's online algorithm
-                    counts[hook] += total_tokens
-
-                    # Calculate deltas for Welford's algorithm (vectorized)
-                    delta = states.mean(dim=(0, 1)) - means[hook]
-                    means[hook] += delta * (total_tokens / counts[hook])
-
-                    # Calculate contribution to M2
-                    delta2 = states.mean(dim=(0, 1)) - means[hook]
-                    M2s[hook] += total_tokens * delta * delta2
-
-                    # Update norm statistics
-                    norm_sums[hook] += torch.norm(states, dim=2).sum().item()
-                    norm_counts[hook] += total_tokens
-
-                    # Move to CPU for saving
-                    cpu_activations = {
-                        "states": states.to(device="cpu", non_blocking=True),
-                        "input_ids": cleaned_activations[hook]["input_ids"].to(
-                            device="cpu", non_blocking=True
-                        ),
-                    }
-
-                    # Append to uploader with the current group UUID
-                    file_id = uploaders[hook].append(cpu_activations, current_group_uuid)
-                    if file_id:
-                        any_file_uploaded = True
+                any_file_uploaded = queue_stage(cleaned_activations, uploaders, current_group_uuid)
 
                 if any_file_uploaded:
                     config.n_total_files += 1
                     # Generate new UUID for next group since we just uploaded
                     current_group_uuid = str(uuid4())
-                    group_batch_count = 0
-                else:
-                    group_batch_count += 1
 
             # Update batches processed
             batches_processed += 1
@@ -246,6 +282,83 @@ def generate_activations(
                         # Also save M2 for future resumption
                         uploaders[hook].save_stats(mean, std, norm, M2=M2s[hook].cpu())
 
+                        if decode_uploaders:
+                            decode_uploaders[hook].save_stats(
+                                mean, std, norm, M2=M2s[hook].cpu()
+                            )
+
+            if decode_enabled and max_new_tokens > 0 and past_key_values is not None:
+                logits = outputs.logits[:, -1, :]
+
+                if temperature <= 0:
+                    next_tokens = torch.argmax(logits, dim=-1)
+                else:
+                    next_tokens = sample_next_token(logits)
+                
+                next_input_ids = next_tokens.unsqueeze(-1)
+                finished = torch.zeros(
+                    next_tokens.shape[0], dtype=torch.bool, device=model.device
+                )
+                eos_tensor = (
+                    torch.full_like(next_tokens, eos_token_id)
+                    if eos_token_id is not None else None
+                )
+
+                decode_attention_mask = attention_mask
+
+                for decode_step in range(max_new_tokens):
+                    decode_kwargs = {
+                        "input_ids": next_input_ids,
+                        "use_cache": True,
+                        "output_hidden_states": True,
+                        "past_key_values": past_key_values
+                    }
+                    if decode_attention_mask is not None:
+                        ones = torch.ones_like(next_input_ids, device=model.device)
+                        decode_attention_mask = torch.cat(
+                            [decode_attention_mask, ones], dim=-1
+                        )
+                        decode_kwargs["attention_mask"] = decode_attention_mask
+
+                    decode_outputs = model(**decode_kwargs)
+                    past_key_values = decode_outputs.past_key_values
+
+                    decode_activations = extract_activations(decode_outputs.hidden_states, next_input_ids)
+
+                    active_mask = ~finished
+                    if active_mask.any():
+                        cleaned_decode = {}
+                        for hook in hooks:
+                            states = decode_activations[hook]["states"][active_mask]
+                            tokens = next_input_ids[active_mask]
+                            cleaned_decode[hook] = {
+                                "states": states,
+                                "input_ids": tokens,
+                            }
+                        active_tokens = int(active_mask.sum().item())
+                        config.total_tokens += active_tokens
+
+                        decode_group_uuid = str(uuid4())
+                        if queue_stage(cleaned_decode, decode_uploaders, decode_group_uuid):
+                            config.n_total_files += 1
+                            decode_tokens_written = True
+
+                    logits = decode_outputs.logits[:, -1, :]
+
+                    if temperature <= 0:
+                        next_tokens = torch.argmax(logits, dim=-1)
+                    else:
+                        next_tokens = sample_next_token(logits)
+
+                    if eos_tensor is not None:
+                        finished = finished | (next_tokens == eos_tensor)
+                        next_tokens = torch.where(finished, eos_tensor, next_tokens)
+                    
+                    next_input_ids = next_tokens.unsqueeze(-1)
+
+                    if stop_on_eos and finished.all():
+                        break
+
             pbar.update(1)
 
         pbar.close()
@@ -270,3 +383,10 @@ def generate_activations(
                     # Also save M2 for future resumption
                     uploaders[hook].save_stats(mean, std, norm, M2=M2s[hook].cpu())
                     uploaders[hook].finalize()
+
+                    if decode_uploaders:
+                        if decode_tokens_written:
+                            decode_uploaders[hook].save_stats(
+                                mean, std, norm, M2=M2s[hook].cpu()
+                            )
+                        decode_uploaders[hook].finalize()
