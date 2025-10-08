@@ -69,6 +69,8 @@ def main():
         batches_per_upload=config.upload_config["batches_per_upload"],
         bucket_name=config.data_config["bucket_name"],
         decode_enabled=decode_enabled,
+        storage_backend=config.upload_config.get("storage_backend", "s3"),
+        local_output_dir=config.upload_config.get("local_output_dir", "activations"),
     )
     logger.info(f"Uploaders loaded: {uploaders}")
 
