@@ -88,7 +88,9 @@ def main():
     )
 
     # Run generation
-    generate_activations(model, loader, config, uploaders, added_hook_activations, decode_uploaders=decode_uploaders)
+    generate_activations(
+        model, loader, config, uploaders, added_hook_activations, decode_uploaders=decode_uploaders, tokenizer=tokenizer
+    )
 
     # just in case...
     logger.info(

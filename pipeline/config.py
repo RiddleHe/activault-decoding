@@ -67,6 +67,7 @@ class Config:
             "temperature": 1.0,
             "top_p": 0.95,
             "stop_on_eos": True,
+            "log_dir": "decode_logs",
         }
     )
     num_runs: int
@@ -117,6 +118,7 @@ class Config:
                 "temperature": 1.0,
                 "top_p": 0.95,
                 "stop_on_eos": True,
+                "log_dir": "decode_logs",
             },
         )
 
@@ -264,6 +266,7 @@ class Config:
                     "temperature": 1.0,
                     "top_p": 0.95,
                     "stop_on_eos": True,
+                    "log_dir": "decode_logs",
                 },
             )
 

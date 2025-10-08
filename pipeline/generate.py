@@ -13,9 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import torch
+import torch, json
+from pathlib import Path
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer
 from transformers.generation.utils import top_k_top_p_filtering
 from typing import Dict, Optional
 from pipeline.data.dataloader import DataLoader
@@ -35,6 +36,7 @@ def generate_activations(
     uploaders: Dict[str, HookUploader],
     hook_activations: Dict[str, Dict[str, torch.Tensor]] = None,
     decode_uploaders: Optional[Dict[str, HookUploader]] = None,
+    tokenizer: Optional[PreTrainedTokenizer] = None
 ) -> None:
     """
     Main activation generation loop.
@@ -120,6 +122,15 @@ def generate_activations(
     stop_on_eos = bool(config.decode_config.get("stop_on_eos", True))
     eos_token_id = model.config.eos_token_id
     decode_tokens_written = False
+    decode_log_dir = None
+
+    if decode_enabled:
+        if tokenizer is None:
+            raise RuntimeError("Tokenizer is required when decode logging is enabled")
+        log_dir_str = config.decode_config.get("log_dir")
+        if log_dir_str:
+            decode_log_dir = Path(log_dir_str) / config.run_name
+            decode_log_dir.mkdir(parents=True, exist_ok=True)
 
     def sample_next_token(logits):
         if temperature <= 0:
@@ -226,6 +237,8 @@ def generate_activations(
             try:
                 # Clean special tokens from activations (e.g. BOS)
                 cleaned_activations = {}
+                cleaned_input_ids_snapshot = None
+
                 for hook in hooks:
                     cleaned_input_ids, cleaned_states = loader.clean_batch(
                         activations[hook]["input_ids"], activations[hook]["states"]
@@ -234,6 +247,9 @@ def generate_activations(
                         "states": cleaned_states,
                         "input_ids": cleaned_input_ids,
                     }
+                    if cleaned_input_ids_snapshot is None:
+                        cleaned_input_ids_snapshot = cleaned_input_ids
+
             except Exception as e:
                 logger.warning(f"SKIPPING BATCH {batch_idx} due to error: {e}")
                 continue
@@ -306,6 +322,8 @@ def generate_activations(
 
                 decode_attention_mask = attention_mask
 
+                generated_token_history = [[] for _ in range(next_tokens.shape[0])]
+
                 for decode_step in range(max_new_tokens):
                     decode_kwargs = {
                         "input_ids": next_input_ids,
@@ -353,11 +371,31 @@ def generate_activations(
                     if eos_tensor is not None:
                         finished = finished | (next_tokens == eos_tensor)
                         next_tokens = torch.where(finished, eos_tensor, next_tokens)
+
+                    for row_idx in range(next_tokens.shape[0]):
+                        generated_token_history[row_idx].append(int(next_tokens[row_idx].item()))
                     
                     next_input_ids = next_tokens.unsqueeze(-1)
 
                     if stop_on_eos and finished.all():
                         break
+                
+                if decode_log_dir is not None and cleaned_input_ids_snapshot is not None:
+                    prompts = tokenizer.batch_decode(cleaned_input_ids_snapshot.cpu(), skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                    responses = tokenizer.batch_decode([
+                        [tok for tok in seq if tok != eos_token_id]
+                        for seq in generated_token_history
+                    ], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                    transcript = []
+                    for idx, (prompt_text, response_text) in enumerate(zip(prompts, responses)):
+                        transcript.append({
+                            "batch_idx": batch_idx,
+                            "row_idx": idx,
+                            "prompt_text": prompt_text,
+                            "response_text": response_text
+                        })
+                    transcript_path = decode_log_dir / f"batch_{batch_idx:06d}.json"
+                    transcript_path.write_text(json.dumps(transcript, ensure_ascii=False))
 
             pbar.update(1)
 
