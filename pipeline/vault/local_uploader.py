@@ -50,13 +50,9 @@ class LocalHookUploader:
         if self.metadata is None:
             raise ValueError("Cannot finalize cache without any data")
 
-        if len(self._in_mem) > 0:
-            if len(self._in_mem) == self.batches_per_upload:
-                logger.debug("Queueing save for final full batch group (disk backend)")
-                self._queue_save_in_mem()
-            else:
-                logger.warning(f"Discarding {len(self._in_mem)} incomplete batches for {self.prefix_path}")
-                self._in_mem = []
+        if self._in_mem:
+            logger.debug(f"Flushing {len(self._in_mem)} residual batches for {self.prefix_path}")
+            self._flush_in_mem(force=True)
             
         logger.info(f"Waiting for {self.pending_uploads} pending disk writes for {self.prefix_path}")
         wait_start = time.time()
@@ -78,18 +74,28 @@ class LocalHookUploader:
         self._worker.join(timeout=30)
 
     def _queue_save_in_mem(self):
+        return self._flush_in_mem(force=False)
+
+    def _flush_in_mem(self, force):
+        if not self._in_mem:
+            return None
+        if not force and len(self._in_mem) != self.batches_per_upload:
+            return None
+
         combined_states = torch.cat([item["states"] for item in self._in_mem])
         combined_input_ids = torch.cat([item["input_ids"] for item in self._in_mem])
         combined = {
             "states": combined_states,
             "input_ids": combined_input_ids,
         }
+        group_uuid = self.current_group_uuid or str(uuid4())
         self.pending_uploads += 1
-        self._queue.put((combined, self.current_group_uuid))
+        self._queue.put((combined, group_uuid))
         self._in_mem = []
-        return self.current_group_uuid
+        self.current_group_uuid = group_uuid
+        return group_uuid
 
-    def _write_loop(self):
+    def _writer_loop(self):
         while not self._stop_event.is_set() or not self._queue.empty():
             try:
                 item = self._queue.get(timeout=0.5)
@@ -113,7 +119,7 @@ class LocalHookUploader:
         filename = self._filename(group_uuid)
         file_path = self.prefix_path / filename
 
-        tensor_bytes = torch.save(activations_dict, file_path)
+        torch.save(activations_dict, file_path)
         bytes_per_file = (
             activations_dict["states"].numel() * activations_dict["states"].element_size() +
             activations_dict["input_ids"].numel() * activations_dict["input_ids"].element_size()
@@ -124,15 +130,28 @@ class LocalHookUploader:
             self._save_metadata()
 
     def _validate_activations(self, activations):
-        expected_shape = (
-            self.metadata["batch_size"], self.metadata["sequence_length"], self.metadata["d_in"]
-        )
-        if activations["states"].shape != expected_shape:
-            logger.warning(f"NOT SAVING: expected {expected_shape}, got {activations['states'].shape}")
-            return False
+        seq_len = self.metadata["sequence_length"] # decode and prefill are using different loaders
+        d_in = self.metadata["d_in"]
+        states = activations["states"]
+        input_ids = activations["input_ids"]
 
-        if str(activations["states"].dtype) != self.metadata["dtype"]:
-            logger.warning(f"NOT SAVING: expected {self.metadata['dtype']}, got {activations['states'].dtype}")
+        if states.shape[1] != seq_len or states.shape[2] != d_in:
+            logger.warning(f"NOT SAVING: expected seq_len={seq_len} d_in={d_in}, got {states.shape[1:]}")
+            return False 
+
+        if seq_len == 1:
+            if input_ids.shape[0] != states.shape[0] or input_ids.shape[1] != 1:
+                logger.warning(f"NOT SAVING: expected decode input_ids=({states.shape[0]}, 1), got {input_ids.shape}")
+                return False
+
+        else:
+            expected_batch = self.metadata["batch_size"]
+            if states.shape[0] != expected_batch or input_ids.shape != (expected_batch, seq_len):
+                logger.warning(f"NOT SAVING: expected batch={expected_batch} input_ids=({expected_batch},{seq_len}), got {states.shape[0]}, {input_ids.shape}")
+                return False
+
+        if str(states.dtype) != self.metadata["dtype"]:
+            logger.warning(f"NOT SAVING: expected dtype={self.metadata['dtype']}, got {states.dtype}")
             return False
 
         return True

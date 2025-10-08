@@ -453,25 +453,30 @@ class HookUploader:
         Returns:
             bool: True if validation passes, False otherwise
         """
-        expected_shape = (
-            self.metadata["batch_size"],
-            self.metadata["sequence_length"],
-            self.metadata["d_in"],
-        )
-        if activations["states"].shape != expected_shape:
-            logger.warning(
-                "NOT SAVING: shape mismatch. Expected %s, got %s",
-                expected_shape,
-                activations["states"].shape,
-            )
+        seq_len = self.metadata["sequence_length"] # decode and prefill are using different loaders
+        d_in = self.metadata["d_in"]
+        states = activations["states"]
+        input_ids = activations["input_ids"]
+
+        if states.shape[1] != seq_len or states.shape[2] != d_in:
+            logger.warning(f"NOT SAVING: expected seq_len={seq_len} d_in={d_in}, got {states.shape[1:]}")
+            return False 
+
+        if seq_len == 1: # decode have varying batch size, so avoid the check
+            if input_ids.shape[0] != states.shape[0] or input_ids.shape[1] != 1:
+                logger.warning(f"NOT SAVING: expected decode input_ids=({states.shape[0]}, 1), got {input_ids.shape}")
+                return False
+
+        else:
+            expected_batch = self.metadata["batch_size"]
+            if states.shape[0] != expected_batch or input_ids.shape != (expected_batch, seq_len):
+                logger.warning(f"NOT SAVING: expected batch={expected_batch} input_ids=({expected_batch},{seq_len}), got {states.shape[0]}, {input_ids.shape}")
+                return False
+
+        if str(states.dtype) != self.metadata["dtype"]:
+            logger.warning(f"NOT SAVING: expected dtype={self.metadata['dtype']}, got {states.dtype}")
             return False
-        if str(activations["states"].dtype) != self.metadata["dtype"]:
-            logger.warning(
-                "NOT SAVING: dtype mismatch. Expected %s, got %s",
-                self.metadata["dtype"],
-                activations["states"].dtype,
-            )
-            return False
+
         return True
 
     def _save_metadata(self) -> None:
