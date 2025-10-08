@@ -23,6 +23,7 @@ from pipeline.data.dataloader import DataLoader
 from pipeline.config import Config
 from pipeline.vault import HookUploader
 from s3.utils import create_s3_client
+from time import perf_counter
 import logging
 from uuid import uuid4
 
@@ -123,6 +124,15 @@ def generate_activations(
     eos_token_id = model.config.eos_token_id
     decode_tokens_written = False
     decode_log_dir = None
+
+    throughput_interval_s = 30
+    last_throughput_log = perf_counter()
+    total_prefill_tokens = 0
+    total_decode_tokens = 0
+    last_prefill_tokens_logged = 0
+    last_decode_tokens_logged = 0
+    max_pending_prefill = 0
+    max_pending_decode = 0
 
     if decode_enabled:
         if tokenizer is None:
@@ -259,6 +269,9 @@ def generate_activations(
                 config.data_config["batch_size"] * config.data_config["seq_length"]
             )
 
+            if cleaned_input_ids_snapshot is not None:
+                total_prefill_tokens += int(cleaned_input_ids_snapshot.numel())
+
             # Compute statistics and move to CPU
             if uploaders:
                 any_file_uploaded = queue_stage(cleaned_activations, uploaders, current_group_uuid)
@@ -355,6 +368,7 @@ def generate_activations(
                             }
                         active_tokens = int(active_mask.sum().item())
                         config.total_tokens += active_tokens
+                        total_decode_tokens += active_tokens
 
                         decode_group_uuid = str(uuid4())
                         if queue_stage(cleaned_decode, decode_uploaders, decode_group_uuid):
@@ -381,11 +395,14 @@ def generate_activations(
                         break
                 
                 if decode_log_dir is not None and cleaned_input_ids_snapshot is not None:
-                    prompts = tokenizer.batch_decode(cleaned_input_ids_snapshot.cpu(), skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                    responses = tokenizer.batch_decode([
+                    prompts = tokenizer.batch_decode(
+                        cleaned_input_ids_snapshot.cpu(), skip_special_tokens=True, clean_up_tokenization_spaces=False
+                    )
+                    response_token_ids = [
                         [tok for tok in seq if tok != eos_token_id]
-                        for seq in generated_token_history
-                    ], skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                        for seq_ in generated_token_history
+                    ]
+                    responses = tokenizer.batch_decode(response_token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                     transcript = []
                     for idx, (prompt_text, response_text) in enumerate(zip(prompts, responses)):
                         transcript.append({
@@ -397,9 +414,42 @@ def generate_activations(
                     transcript_path = decode_log_dir / f"batch_{batch_idx:06d}.json"
                     transcript_path.write_text(json.dumps(transcript, ensure_ascii=False))
 
+            now = perf_counter()
+            if now - last_throughput_log >= throughput_interval_s:
+                interval = now - last_throughput_log
+                prefill_delta = total_prefill_tokens - last_prefill_tokens_logged
+                decode_delta = total_decode_tokens - last_decode_tokens_logged
+                prefill_tps = prefill_delta / interval if interval > 0 else 0.0
+                decode_tps = decode_delta / interval if interval > 0 else 0.0
+
+                logger.info(
+                    f"[Throughput] Prefill: {prefill_tps:.1f} tok/s | "
+                    f"Decode: {decode_tps:.1f} tok/s"
+                )
+
+                def _pending_count(uploader_map):
+                    if not uploader_map:
+                        return 0
+                    return sum(int(getattr(uploader, "pending_uploads", 0)) for uploader in uploader_map.values())
+                
+                prefill_pending = _pending_count(uploaders)
+                decode_pending = _pending_count(decode_uploaders) if decode_uploaders else 0
+                max_pending_prefill = max(max_pending_prefill, prefill_pending)
+                max_pending_decode = max(max_pending_decode, decode_pending)
+
+                logger.info("[IO] Pending uploads - prefill {prefill_pending} | decode {decode_pending}")
+                last_prefill_tokens_logged = total_prefill_tokens
+                last_decode_tokens_logged = total_decode_tokens
+                last_throughput_log = now
+
             pbar.update(1)
 
         pbar.close()
+
+        logger.info(
+            "[Throughput] Prefill tokens={total_prefill_tokens} | Decode tokens={total_decode_tokens} | "
+            "Max pending uploads (prefill={max_pending_prefill} | decode={max_pending_decode})"
+        )
 
         # Save final config and statistics only from machine index 0
         if config.machine_index == 0:
