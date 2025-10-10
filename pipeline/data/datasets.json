@@ -27,15 +27,12 @@
             "langdetect": "en"
         }
     },
-    "infinity-instruct-prompt-only:CHAT_TEMPLATE": {
-        "name": "RiddleHe/infinity-instruct-0625-conv-prompt-only",
+    "alpaca-prompt-only:CHAT_TEMPLATE": {
+        "name": "RiddleHe/alpaca-prompt-only",
         "subset": "default",
         "columns": [
             "conversations"
-        ],
-        "filter": {
-            "langdetect": "en"
-        }
+        ]
     },
     "lmsys:CHAT_TEMPLATE": {
         "name": "OpenLeecher/lmsys_chat_1m_clean",

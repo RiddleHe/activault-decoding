@@ -5,10 +5,10 @@ transformer_config:
   dtype: bfloat16
 
 data_config:
-  data_key: infinity-instruct-prompt-only:CHAT_TEMPLATE
+  data_key: alpaca-prompt-only:CHAT_TEMPLATE
   add_generation_prompt: true
   seq_length: 2048
-  batch_size: 8
+  batch_size: 4
   n_batches: 16
   start_batch: 0
   skip_cache: False

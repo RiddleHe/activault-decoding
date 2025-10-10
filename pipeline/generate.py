@@ -241,6 +241,17 @@ def generate_activations(
 
             # Move batch to model's device
             batch = {k: v.to(device=model.device) for k, v in batch.items()}
+            
+            vocab_size = getattr(model.config, "vocab_size", None)
+            if vocab_size is not None:
+                max_id = int(batch["input_ids"].max().item())
+                min_id = int(batch["input_ids"].min().item())
+                if max_id >= vocab_size or min_id < 0:
+                    logger.error(
+                        f"Skipping batch {batch_idx}: token id range ({min_id}, {max_id}) is outside of vocab size {vocab_size}"
+                    )
+                    continue
+
             attention_mask = batch.get("attention_mask")
             use_cache = decode_enabled and max_new_tokens > 0
 
@@ -414,7 +425,7 @@ def generate_activations(
                     )
                     response_token_ids = [
                         [tok for tok in seq if tok != eos_token_id]
-                        for seq_ in generated_token_history
+                        for seq in generated_token_history
                     ]
                     responses = tokenizer.batch_decode(response_token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
                     transcript = []
