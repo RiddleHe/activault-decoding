@@ -19,6 +19,7 @@ from typing import Tuple, List, Dict, Optional
 import os
 from pipeline.vault import HookUploader
 from accelerate import dispatch_model, infer_auto_device_map
+from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)

@@ -3,14 +3,12 @@ run_name: gpt_oss_20b.edu-benchmark
 transformer_config:
   model_name: openai/gpt-oss-20b
   dtype: bfloat16
-  kwargs:
-    use_flash_attention: True
 
 data_config:
   data_key: infinity-instruct-prompt-only:CHAT_TEMPLATE
   add_generation_prompt: true
   seq_length: 2048
-  batch_size: 4
+  batch_size: 8
   n_batches: 16
   start_batch: 0
   skip_cache: False
