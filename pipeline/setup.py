@@ -17,7 +17,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import Tuple, List, Dict, Optional
 import os
-from pipeline.vault import HookUploader
+from pipeline.vault import HookUploader, LocalHookUploader
 from accelerate import dispatch_model, infer_auto_device_map
 from pathlib import Path
 import logging
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 def setup_model_and_tokenizer(
     transformer_config: dict,
     hooks: List[str] = None,
+    decode_enabled: bool = False,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """Set up and configure a transformer model and tokenizer for activation extraction.
 
@@ -71,7 +72,9 @@ def setup_model_and_tokenizer(
         **transformer_config.get("kwargs", {}),
     )
 
-    if hooks:
+    should_truncate = hooks and not decode_enabled
+
+    if should_truncate:
         import gc
 
         # Find the highest layer number from hooks
@@ -104,8 +107,11 @@ def setup_model_and_tokenizer(
             f"Memory saved: {(total_params_before - total_params_after) * dtype.itemsize / (1024**3):.2f} GB"
         )
     else:
-        logger.info("No hooks provided, using all layers")
-        hooks = [f"models.layers.{i}.mlp.post" for i in range(model.config.num_hidden_layers)]
+        if hooks and decode_enabled:
+            logger.info("Decode enabled, using all layers. Hooks provided.")
+        else:
+            logger.info("No hooks provided, using all layers")
+            hooks = [f"models.layers.{i}.mlp.post" for i in range(model.config.num_hidden_layers)]
 
     decoder_cls = model.model.layers[0].__class__.__name__
 

@@ -49,8 +49,9 @@ def main():
     dataset = load_dataset_by_key(config.data_config["data_key"])
 
     # Setup model and tokenizer with hooks for truncation
+    decode_enabled = config.decode_config.get("enable", False)
     model, tokenizer, hooks = setup_model_and_tokenizer(
-        config.transformer_config, hooks=config.upload_config.get("hooks")
+        config.transformer_config, hooks=config.upload_config.get("hooks"), decode_enabled=decode_enabled
     )
     logger.info(f"Model loaded: {model}")
 
@@ -62,7 +63,6 @@ def main():
     display_job_stats(model, hooks, config, batches_per_machine)
 
     # Setup uploaders (one per hook)
-    decode_enabled = config.decode_config.get("enable", False)
     uploaders, decode_uploaders = setup_uploaders(
         run_name=config.run_name,
         hooks=hooks,
