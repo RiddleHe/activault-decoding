@@ -60,6 +60,7 @@ class Config:
     transformer_config: Dict[str, Any]
     data_config: Dict[str, Any]
     upload_config: Dict[str, Any]
+    num_runs: int
     decode_config: Dict[str, Any] = field(
         default_factory=lambda: {
             "enable": False,
@@ -70,7 +71,6 @@ class Config:
             "log_dir": "decode_logs",
         }
     )
-    num_runs: int
     total_tokens: int = 0
     d_model: Optional[int] = None
     n_total_files: int = 0
