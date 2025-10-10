@@ -357,6 +357,10 @@ def generate_activations(
                     decode_activations = extract_activations(decode_outputs.hidden_states, next_input_ids)
 
                     active_mask = ~finished
+                    if eos_tensor is not None:
+                        eos_mask = next_input_ids.squeeze(-1) == eos_tensor
+                        active_mask = active_mask & ~eos_mask
+                        
                     if active_mask.any():
                         cleaned_decode = {}
                         for hook in hooks:

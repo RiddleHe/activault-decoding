@@ -83,6 +83,7 @@ def main():
         start_batch_skip=start_batch_skip,
         batches_per_machine=batches_per_machine,
         dataset_key=config.data_config["data_key"],
+        add_generation_prompt=config.data_config["add_generation_prompt"],
         skip_cache=config.data_config["skip_cache"],
         clean_added_tokens=config.data_config["clean_added_tokens"],
     )

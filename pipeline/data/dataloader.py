@@ -46,6 +46,7 @@ class DataLoader:
         skip_cache: bool = False,
         clean_added_tokens: bool = True,
         clean_default_system_prompt: bool = True,
+        add_generation_prompt: bool = False,
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
@@ -55,6 +56,7 @@ class DataLoader:
         self.skip_cache = skip_cache
         self.clean_added_tokens = clean_added_tokens
         self.clean_default_system_prompt = clean_default_system_prompt
+        self.add_generation_prompt = self.apply_chat_template and add_generation_prompt
         logger.info(f"NOTICE: Cleaning default system prompt: {clean_default_system_prompt}")
         # Initialize dataset iterator
         self.dataset_iter = iter(self.dataset)
@@ -77,7 +79,8 @@ class DataLoader:
             self.buffer_size += 20 * MAX_N_PACKED
 
         # Chat-specific setup
-        if self.clean_default_system_prompt:
+        self.generation_prompt_tokens = []
+        if self.apply_chat_template and self.clean_default_system_prompt:
             # Get the start string pattern by applying template to a dummy message
             dummy_msg = [{"role": "user", "content": "test"}]
             template_text = tokenizer.apply_chat_template(dummy_msg, tokenize=False)
@@ -91,6 +94,18 @@ class DataLoader:
             )["input_ids"][1:]
 
             self.buffer_size += len(self.tokenized_system_prompt) * MAX_N_PACKED
+
+            if self.add_generation_prompt:
+                template_with_prompt = tokenizer.apply_chat_template(
+                    dummy_msg, tokenize=False, add_generation_prompt=True
+                )
+                prompt_suffix = template_with_prompt[len(template_text):]
+                if prompt_suffix:
+                    tokenized_prompt = tokenizer(
+                        prompt_suffix, truncation=False, return_attention_mask=False
+                    )["input_ids"][1:]
+                    self.generation_prompt_tokens = tokenized_prompt
+                    self.buffer_size += len(self.generation_prompt_tokens) * MAX_N_PACKED
 
         self.base_max_length = max_length
         self.max_length = max_length + self.buffer_size
@@ -144,7 +159,10 @@ class DataLoader:
                 break
 
             if self.apply_chat_template:
-                text_batch = self.tokenizer.apply_chat_template(text_batch, tokenize=False)
+                chat_kwargs = {"tokenize": False}
+                if self.add_generation_prompt:
+                    chat_kwargs["add_generation_prompt"] = True
+                text_batch = self.tokenizer.apply_chat_template(text_batch, **chat_kwargs)
 
             tokenized = self.tokenizer(text_batch, truncation=False, return_attention_mask=False)
 
@@ -208,6 +226,15 @@ class DataLoader:
                     match_positions = np.where(matches)[0]
                     for pos in match_positions:
                         mask[pos : pos + cutoff_len] = False
+
+        if self.add_generation_prompt:
+            cutoff_len = len(self.generation_prompt_tokens)
+            if cutoff_len > 0 and len(ids) >= cutoff_len:
+                windows = np.lib.stride_tricks.sliding_window_view(ids, cutoff_len)
+                matches = np.all(windows == self.generation_prompt_tokens, axis=1)
+                match_positions = np.where(matches)[0]
+                for pos in match_positions:
+                    mask[pos : pos + cutoff_len] = False
 
         return ids[mask].tolist(), mask.tolist()
 
@@ -306,7 +333,10 @@ class DataLoader:
                 if self.apply_chat_template:
                     messages = [self._convert_chat_format(s) for s in sample]
                     messages = self._fix_chat_sequence(messages)
-                    sample = self.tokenizer.apply_chat_template(messages, tokenize=False)
+                    chat_kwargs = {"tokenize": False}
+                    if self.add_generation_prompt:
+                        chat_kwargs["add_generation_prompt"] = True
+                    sample = self.tokenizer.apply_chat_template(messages, **chat_kwargs)
 
                 tokenized = self.tokenizer(sample, truncation=False, return_attention_mask=False)
 
