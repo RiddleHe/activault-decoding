@@ -16,7 +16,7 @@ limitations under the License.
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import Tuple, List, Dict, Optional
-import os
+import os, gc
 from pipeline.vault import HookUploader, LocalHookUploader
 from accelerate import dispatch_model, infer_auto_device_map
 from pathlib import Path
@@ -75,7 +75,6 @@ def setup_model_and_tokenizer(
     should_truncate = hooks and not decode_enabled
 
     if should_truncate:
-        import gc
 
         # Find the highest layer number from hooks
         layer_numbers = [int(hook.split(".")[2]) for hook in hooks if hook.startswith("models.layers")]
