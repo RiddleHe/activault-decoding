@@ -22,7 +22,6 @@ from typing import Dict, Optional
 from pipeline.data.dataloader import DataLoader
 from pipeline.config import Config
 from pipeline.vault import HookUploader
-from s3.utils import create_s3_client
 from time import perf_counter
 import logging
 from uuid import uuid4
@@ -53,20 +52,27 @@ def generate_activations(
     # Set d_model in config
     config.d_model = model.config.hidden_size
 
-    # Create S3 client for config saving
-    s3_client = create_s3_client()
+    storage_backend = config.upload_config.get("storage_backend", "s3")
+    use_s3 = storage_backend == "s3"
+    s3_client = None
+    existing_config = None
 
-    # Load existing config and stats if available
-    existing_config = Config.load_from_s3(s3_client, config.data_config["bucket_name"])
-    if existing_config:
-        logger.info(f"Resuming run {config.run_name} from {existing_config.total_tokens} tokens")
-        config.total_tokens = existing_config.total_tokens
-        config.n_total_files = existing_config.n_total_files
-        config.batches_processed = existing_config.batches_processed
+    if use_s3:
+        from s3.utils import create_s3_client
+        # Create S3 client for config saving
+        s3_client = create_s3_client()
 
-        # Skip tokens based on existing total tokens with an offset
-        tokens_to_skip = existing_config.total_tokens + 3000
-        loader.skip_tokens(tokens_to_skip)
+        # Load existing config and stats if available
+        existing_config = Config.load_from_s3(s3_client, config.data_config["bucket_name"])
+        if existing_config:
+            logger.info(f"Resuming run {config.run_name} from {existing_config.total_tokens} tokens")
+            config.total_tokens = existing_config.total_tokens
+            config.n_total_files = existing_config.n_total_files
+            config.batches_processed = existing_config.batches_processed
+
+            # Skip tokens based on existing total tokens with an offset
+            tokens_to_skip = existing_config.total_tokens + 3000
+            loader.skip_tokens(tokens_to_skip)
 
     # Initialize statistics tracking
     hooks = config.upload_config["hooks"]
@@ -78,24 +84,25 @@ def generate_activations(
     norm_sums = {hook: torch.zeros(1, device=model.device) for hook in hooks}  # Track sum of norms
     norm_counts = {hook: 0 for hook in hooks}  # Track count for norms
 
-    # Load existing statistics if available
-    for hook in hooks:
-        stats = Config.load_hook_statistics(
-            s3_client, config.run_name, hook, config.data_config["bucket_name"]
-        )
-        if stats:
-            logger.info(f"Loading existing statistics for {hook}")
-            means[hook] = torch.tensor(stats["mean"], device=model.device)
-            if "M2" in stats:
-                M2s[hook] = torch.tensor(stats["M2"], device=model.device)
-            else:
-                # If M2 not available, approximate from std (for backward compatibility)
-                std = torch.tensor(stats["std"], device=model.device)
-                M2s[hook] = std * std * config.batches_processed
+    if use_s3:
+        # Load existing statistics if available
+        for hook in hooks:
+            stats = Config.load_hook_statistics(
+                s3_client, config.run_name, hook, config.data_config["bucket_name"]
+            )
+            if stats:
+                logger.info(f"Loading existing statistics for {hook}")
+                means[hook] = torch.tensor(stats["mean"], device=model.device)
+                if "M2" in stats:
+                    M2s[hook] = torch.tensor(stats["M2"], device=model.device)
+                else:
+                    # If M2 not available, approximate from std (for backward compatibility)
+                    std = torch.tensor(stats["std"], device=model.device)
+                    M2s[hook] = std * std * config.batches_processed
 
-            counts[hook] = config.batches_processed
-            norm_sums[hook] = stats.get("norm", 0.0) * config.batches_processed
-            norm_counts[hook] = config.batches_processed
+                counts[hook] = config.batches_processed
+                norm_sums[hook] = stats.get("norm", 0.0) * config.batches_processed
+                norm_counts[hook] = config.batches_processed
 
     # Prepare for activation collection
     layers = {hook: int(hook.split(".")[2]) for hook in hooks}
@@ -289,11 +296,12 @@ def generate_activations(
                 config.machine_index == 0
                 and batches_processed % config.upload_config["batches_per_upload"] == 0
             ):
-                # Update config with the current state
-                config.batches_processed = batches_processed
+                if use_s3:
+                    # Update config with the current state
+                    config.batches_processed = batches_processed
 
-                # Save config in a non-blocking way
-                config.save_to_s3(s3_client, blocking=False)
+                    # Save config in a non-blocking way
+                    config.save_to_s3(s3_client, blocking=False)
 
                 # Save statistics
                 if uploaders:
@@ -360,7 +368,7 @@ def generate_activations(
                     if eos_tensor is not None:
                         eos_mask = next_input_ids.squeeze(-1) == eos_tensor
                         active_mask = active_mask & ~eos_mask
-                        
+
                     if active_mask.any():
                         cleaned_decode = {}
                         for hook in hooks:
@@ -458,7 +466,8 @@ def generate_activations(
         # Save final config and statistics only from machine index 0
         if config.machine_index == 0:
             config.batches_processed = batches_processed
-            config.save_to_s3(s3_client, blocking=True)  # Block on final save
+            if use_s3:
+                config.save_to_s3(s3_client, blocking=True)  # Block on final save
 
             if uploaders:
                 for hook in hooks:
