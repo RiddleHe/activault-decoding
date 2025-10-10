@@ -238,22 +238,19 @@ def generate_activations(
         for batch_idx, batch in enumerate(loader):
             if batch_idx >= config.data_config["n_batches"]:
                 break
-
-            # Move batch to model's device
-            batch = {k: v.to(device=model.device) for k, v in batch.items()}
             
-            vocab_size = getattr(model.config, "vocab_size", None)
-            if vocab_size is not None:
-                max_id = int(batch["input_ids"].max().item())
-                min_id = int(batch["input_ids"].min().item())
-                if max_id >= vocab_size or min_id < 0:
-                    logger.error(
-                        f"Skipping batch {batch_idx}: token id range ({min_id}, {max_id}) is outside of vocab size {vocab_size}"
-                    )
-                    continue
-
-            attention_mask = batch.get("attention_mask")
+            # Move batch to model's device
+            moved_batch = {}
+            for k, v in batch.items():
+                print(f"[Generate] {k}: {v.shape}")
+                try:
+                    moved_batch[k] = v.to(device=model.device)
+                except Exception as e:
+                    print(f"[Error] {k}: {v.shape} {e}")
+            # batch = {k: v.to(device=model.device) for k, v in batch.items()}
+            attention_mask = moved_batch.get("attention_mask")
             use_cache = decode_enabled and max_new_tokens > 0
+            batch = moved_batch
 
             # Forward pass
             outputs = model(

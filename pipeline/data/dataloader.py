@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # If your samples are very short and you are cleaning tokens, you may need to increase this.
 # Alternatively, you can reduce this for higher efficiency.
-MAX_N_PACKED = 12
+MAX_N_PACKED = 1
 
 
 class DataLoader:
