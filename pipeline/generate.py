@@ -16,8 +16,7 @@ limitations under the License.
 import torch, json
 from pathlib import Path
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, PreTrainedTokenizer
-from transformers.generation.utils import top_k_top_p_filtering
+from transformers import AutoModelForCausalLM, PreTrainedTokenizer, LogitsProcessorList, TopPLogitsWarper, TemperatureLogitsWarper
 from typing import Dict, Optional
 from pipeline.data.dataloader import DataLoader
 from pipeline.config import Config
@@ -149,16 +148,19 @@ def generate_activations(
             decode_log_dir = Path(log_dir_str) / config.run_name
             decode_log_dir.mkdir(parents=True, exist_ok=True)
 
+    logits_warpers = LogitsProcessorList()
+    if temperature > 0:
+        logits_warpers.append(TemperatureLogitsWarper(max(temperature, 1e-5)))
+    if top_p < 1.0:
+        logits_warpers.append(TopPLogitsWarper(top_p=top_p))
+
     def sample_next_token(logits):
-        if temperature <= 0:
+        if len(logits_warpers) == 0:
             return torch.argmax(logits, dim=-1)
-        filtered_logits = top_k_top_p_filtering(
-            logits / max(temperature, 1e-5),
-            top_k=0,
-            top_p=top_p,
+        warped_logits = logits_warpers(
+            None, logits
         )
-        probs = torch.softmax(filtered_logits, dim=-1)
-        probs = probs / probs.sum(dim=-1, keepdim=True)
+        probs = torch.softmax(warped_logits, dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     def extract_activations(hidden_states, token_tensor):
