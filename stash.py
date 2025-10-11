@@ -86,6 +86,7 @@ def main():
         add_generation_prompt=config.data_config["add_generation_prompt"],
         skip_cache=config.data_config["skip_cache"],
         clean_added_tokens=config.data_config["clean_added_tokens"],
+        decode_enabled=decode_enabled,
     )
 
     # Run generation

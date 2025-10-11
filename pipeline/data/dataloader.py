@@ -66,10 +66,13 @@ class DataLoader:
 
         # Setup invalid tokens list
         self.invalid_tokens = [
-            self.tokenizer.eos_token_id,
-            self.tokenizer.pad_token_id,
-            self.tokenizer.bos_token_id,
-            128000,  # Chat template token
+            token_id 
+            for token_id in (
+                self.tokenizer.eos_token_id,
+                self.tokenizer.pad_token_id,
+                self.tokenizer.bos_token_id,
+                128000,  # Chat template token
+            ) if token_id is not None
         ]
 
         if hasattr(self.tokenizer, "added_tokens_decoder") and self.clean_added_tokens:
@@ -355,7 +358,7 @@ class DataLoader:
                     else:
                         seq["attention_mask"] = seq["attention_mask"].to(torch.long)
                     seq_buffer.append(seq)
-                    self.courrent_texts = []
+                    self.current_texts = []
                     self.current_batch_tokens = 0
                     continue
 
