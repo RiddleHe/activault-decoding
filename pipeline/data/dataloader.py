@@ -47,6 +47,7 @@ class DataLoader:
         clean_added_tokens: bool = True,
         clean_default_system_prompt: bool = True,
         add_generation_prompt: bool = False,
+        decode_enabled: bool = False,
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
@@ -57,6 +58,8 @@ class DataLoader:
         self.clean_added_tokens = clean_added_tokens
         self.clean_default_system_prompt = clean_default_system_prompt
         self.add_generation_prompt = self.apply_chat_template and add_generation_prompt
+        self.decode_enabled = decode_enabled
+        self.disable_packing = decode_enabled
         logger.info(f"NOTICE: Cleaning default system prompt: {clean_default_system_prompt}")
         # Initialize dataset iterator
         self.dataset_iter = iter(self.dataset)
@@ -66,7 +69,6 @@ class DataLoader:
             self.tokenizer.eos_token_id,
             self.tokenizer.pad_token_id,
             self.tokenizer.bos_token_id,
-            -100,
             128000,  # Chat template token
         ]
 
@@ -117,7 +119,13 @@ class DataLoader:
         self.cached_text = None
 
         # Setup collator
-        self.collator = DataCollatorWithFlattening(return_position_ids=True, separator_id=-100)
+        self.pad_token_id = (
+            self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None
+            else self.tokenizer.eos_token_id
+        )
+        if self.pad_token_id is None:
+            raise RuntimeError("No pad token id found.")
+        self.collator = DataCollatorWithFlattening(return_position_ids=True, separator_id=self.pad_token_id) # avoid cuda index error with -100
 
         # Initial skip based on start batch
         start_tokens = 25 * start_batch_skip * batch_size * max_length
@@ -340,6 +348,17 @@ class DataLoader:
 
                 tokenized = self.tokenizer(sample, truncation=False, return_attention_mask=False)
 
+                if self.disable_packing:
+                    seq = self.collator([tokenized])
+                    if "attention_mask" not in seq:
+                        seq["attention_mask"] = torch.ones_like(seq["input_ids"], dtype=torch.long)
+                    else:
+                        seq["attention_mask"] = seq["attention_mask"].to(torch.long)
+                    seq_buffer.append(seq)
+                    self.courrent_texts = []
+                    self.current_batch_tokens = 0
+                    continue
+
                 n_tokens = len(tokenized["input_ids"])
                 self.current_texts.append(tokenized)
 
@@ -357,7 +376,12 @@ class DataLoader:
                     texts = self.current_texts
                     self.current_texts = []
                     self.current_batch_tokens = 0
-                    seq_buffer.append(self.collator(texts))
+                    seq = self.collator(texts)
+                    if "attention_mask" not in seq:
+                        seq["attention_mask"] = torch.ones_like(seq["input_ids"], dtype=torch.long)
+                    else:
+                        seq["attention_mask"] = seq["attention_mask"].to(torch.long)
+                    seq_buffer.append(seq)
 
                 else:
                     self.current_batch_tokens += n_tokens
@@ -366,12 +390,22 @@ class DataLoader:
                         texts = self.current_texts
                         self.current_texts = []
                         self.current_batch_tokens = 0
-                        seq_buffer.append(self.collator(texts))
+                        seq = self.collator(texts)
+                        if "attention_mask" not in seq:
+                            seq["attention_mask"] = torch.ones_like(seq["input_ids"], dtype=torch.long)
+                        else:
+                            seq["attention_mask"] = seq["attention_mask"].to(torch.long)
+                        seq_buffer.append(seq)
 
             except StopIteration:
                 if self.current_texts:
                     # Add final packed sequence to buffer
-                    seq_buffer.append(self.collator(self.current_texts))
+                    seq = self.collator(self.current_texts)
+                    if "attention_mask" not in seq:
+                        seq["attention_mask"] = torch.ones_like(seq["input_ids"], dtype=torch.long)
+                    else:
+                        seq["attention_mask"] = seq["attention_mask"].to(torch.long)
+                    seq_buffer.append(seq)
                     self.current_texts = []
                     self.current_batch_tokens = 0
                 if not seq_buffer:
@@ -380,7 +414,11 @@ class DataLoader:
 
         # Stack all sequences in the buffer into a batch
         self.processed_batches += 1
-        return {
+        batch = {
             "input_ids": torch.cat([seq["input_ids"] for seq in seq_buffer], dim=0),
             "position_ids": torch.cat([seq["position_ids"] for seq in seq_buffer], dim=0),
         }
+        if "attention_mask" in seq_buffer[0]:
+            batch["attention_mask"] = torch.cat([seq["attention_mask"] for seq in seq_buffer], dim=0)
+
+        return batch
