@@ -246,7 +246,7 @@ def generate_activations(
                 try:
                     moved_batch[k] = v.to(device=model.device)
                 except Exception as e:
-                    print(f"[Error] {k}: {v.shape} {e}")
+                    raise ValueError(f"[Error] {k}: {v.shape}")
             # batch = {k: v.to(device=model.device) for k, v in batch.items()}
             attention_mask = moved_batch.get("attention_mask")
             use_cache = decode_enabled and max_new_tokens > 0
