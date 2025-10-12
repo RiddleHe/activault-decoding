@@ -240,7 +240,17 @@ def generate_activations(
                 break
             
             # Move batch to model's device
-            batch = {k: v.to(device=model.device) for k, v in batch.items()}
+            # batch = {k: v.to(device=model.device) for k, v in batch.items()}
+            moved_batch = {}
+            for key, value in batch.items():
+                try:
+                    print(f"[Generate] {key}: {value.shape} | {value.device}")
+                    moved_batch[key] = value.to(device=model.device)
+                except RuntimeError as exc:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    raise RuntimeError(f"CUDA error for {key}: {exc}")
+            batch = moved_batch
             attention_mask = batch.get("attention_mask")
             use_cache = decode_enabled and max_new_tokens > 0
             
